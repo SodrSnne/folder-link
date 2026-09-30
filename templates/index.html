@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="sync-token" content="{{ token }}"><title>Folder Link · SSH 文件同步</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg"><link rel="stylesheet" href="/static/style.css"><script src="/static/app.js" defer></script>
+</head>
+<body>
+<div class="shell">
+<header><a class="brand" href="/"><span class="brand-icon">⇄</span> Folder Link <span class="version">/ LOCAL TOOL</span></a><span class="local-badge"><i></i> 仅在本机运行</span></header>
+<main>
+<div class="intro"><div><div class="eyebrow">YOUR FILES, CONNECTED.</div><h1>两端修改，自动同步<span>。</span></h1><p>通过 SSH 连接服务器，让两个文件夹保持相同的内容。</p></div><div class="intro-icon" aria-hidden="true">↗</div></div>
+<form id="sync-form">
+<div class="workspace">
+<section class="panel connection"><div class="section-heading"><h2><span class="step">01</span>连接服务器</h2><span class="protocol">SSH / SFTP</span></div>
+<div class="host-row"><label>服务器 IP / 主机名<input id="host" name="host" placeholder="192.168.1.100" required autocomplete="off"></label><label>端口<input id="port" name="port" type="number" min="1" max="65535" value="22" required></label></div>
+<label>SSH 账号<input id="username" name="username" placeholder="例如 ubuntu" required autocomplete="username"></label>
+<label>SSH 密码<div class="password-wrap"><input id="password" name="password" type="password" placeholder="输入服务器登录密码" required autocomplete="off"><button type="button" id="show-password" class="text-button" aria-label="显示密码">显示</button></div></label>
+<div class="connection-footer"><span class="hint">密码仅用于当前会话，不保存到磁盘</span><button type="button" class="button secondary" id="test">测试连接 <span>↗</span></button></div>
+<div id="connection-result" class="connection-result" role="status" hidden></div>
+</section>
+<section class="panel mapping"><div class="section-heading"><h2><span class="step">02</span>设置文件夹映射</h2><span class="protocol">LOCAL ⇄ REMOTE</span></div>
+<div class="path-block"><span class="path-icon" aria-hidden="true">▱</span><div><label for="local">本地文件夹 <span class="tag">本机</span></label><div class="path-input"><input id="local" name="local" placeholder="选择或输入本地文件夹绝对路径" required><button type="button" id="choose-folder" class="browse" aria-label="选择本地文件夹">选择</button></div></div></div>
+<div class="direction"><span>↕</span><span>新增与修改双向同步 · 保留目录结构</span></div>
+<div class="path-block"><span class="path-icon" aria-hidden="true">▤</span><div><label for="remote">远程文件夹 <span class="tag">服务器</span></label><input id="remote" name="remote" placeholder="/home/ubuntu/project" required></div></div>
+<div class="mapping-note"><span>ⓘ</span><span>两边都修改时提示冲突；单端删除会从另一端恢复。<br>自动忽略 .git、node_modules、.venv 等缓存目录。</span></div>
+</section>
+</div>
+<div class="action-bar"><div class="auto-description"><span class="pulse-icon">↻</span><div><strong>修改后自动同步</strong><small>每轮间隔 3 秒 · 关闭页面后仍继续同步</small></div></div><div class="actions"><button type="button" id="once" class="button secondary">同步一次</button><button type="submit" id="start" class="button primary">开始自动同步 <span>→</span></button><button type="button" id="stop" class="button danger" hidden>停止同步 ■</button></div></div>
+</form>
+<section class="activity"><div class="activity-header"><h2>同步动态 <span id="status-badge" class="status-badge">未开始</span></h2><span id="last-sync">等待连接服务器</span></div><div class="stats"><span>本次已上传 <strong id="uploaded">0</strong> 个文件</span><span>已下载 <strong id="downloaded">0</strong> 个文件</span><span>未变化 <strong id="skipped">0</strong> 个文件</span></div><div id="conflicts" class="conflicts" hidden></div><div id="logs" class="logs" aria-live="polite"><div class="empty-log"><span>⇄</span><div>准备好连接你的文件夹了<small>填写连接信息和两端路径，然后开始同步。</small></div></div></div></section>
+</main>
+<footer><span>Folder Link <span class="footer-divider">/</span> 简单连接，专注工作。</span><span>本地 ⇄ 远程 · 双向文件同步</span></footer>
+</div>
+<dialog id="trust-dialog"><div class="eyebrow">FIRST CONNECTION</div><h2>确认服务器身份</h2><p>首次连接到 <strong id="trust-host"></strong>，请与服务器管理员提供的 SSH 指纹核对：</p><code id="trust-fingerprint"></code><p class="hint">信任后会在本机记住此指纹；指纹变化时将停止连接。</p><div class="dialog-actions"><button id="trust-cancel" class="button secondary">取消</button><button id="trust-confirm" class="button primary">信任并连接</button></div></dialog>
+</body></html>

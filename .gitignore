@@ -1,0 +1,43 @@
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.coverage
+htmlcov/
+
+# Generated apps, packages and logs
+build/
+dist/
+*.egg-info/
+*.log
+.DS_Store
+
+# Runtime state and private connection/signing data
+.runtime/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.mobileprovision
+known_hosts
+
+# Local agent settings and development planning documents
+.agents/
+.codex/
+.claude/
+.cursor/
+AGENTS.md
+AGENT.md
+CLAUDE.md
+GEMINI.md
+SKILL.md
+**/AGENTS.md
+**/AGENT.md
+**/CLAUDE.md
+**/GEMINI.md
+**/SKILL.md
+docs/plans/
