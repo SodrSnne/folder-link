@@ -444,7 +444,7 @@ struct RootView: View {
                     .font(.system(size: 10)).foregroundStyle(.secondary).lineSpacing(5)
                 Divider().opacity(0.6)
                 HStack(spacing: 6) { Circle().fill(model.ready ? .green.opacity(0.7) : .orange).frame(width: 5, height: 5); Text(model.ready ? "同步引擎已就绪" : "正在准备引擎") }.font(.system(size: 10)).foregroundStyle(.secondary)
-                Text("macOS · 1.1").font(.system(size: 9)).foregroundStyle(.tertiary)
+                Text("macOS · 1.2").font(.system(size: 9)).foregroundStyle(.tertiary)
             }
         }.padding(.horizontal, 20).padding(.top, 52).padding(.bottom, 26)
         .frame(maxHeight: .infinity).background(.white.opacity(0.05))

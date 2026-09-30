@@ -7,6 +7,7 @@ import hashlib
 import os
 import posixpath
 import stat
+import sys
 import threading
 import time
 import uuid
@@ -15,7 +16,18 @@ from pathlib import Path
 
 import paramiko
 
-STATE_DIR = Path(__file__).resolve().parent / '.runtime'
+def default_state_dir():
+    # Bundled one-file executables unpack to a temporary, read-only-lifetime path.
+    if not getattr(sys, 'frozen', False):
+        return Path(__file__).resolve().parent / '.runtime'
+    if sys.platform == 'win32':
+        return Path(os.environ.get('LOCALAPPDATA', str(Path.home() / 'AppData' / 'Local'))) / 'Folder Link'
+    if sys.platform == 'darwin':
+        return Path.home() / 'Library' / 'Application Support' / 'Folder Link'
+    return Path(os.environ.get('XDG_STATE_HOME', str(Path.home() / '.local' / 'state'))) / 'folder-link'
+
+
+STATE_DIR = default_state_dir()
 HOST_KEYS_LOCK = threading.Lock()
 EXCLUDES = {'.git', '.venv', 'node_modules', '__pycache__', '.DS_Store', '.runtime', '.pytest_cache'}
 

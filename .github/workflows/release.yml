@@ -1,0 +1,85 @@
+name: Build executables
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            runner: macos-15
+            native: true
+          - platform: macos-x64
+            runner: macos-15-intel
+            native: true
+          - platform: windows-x64
+            runner: windows-2022
+            native: false
+          - platform: linux-x64
+            runner: ubuntu-22.04
+            native: false
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Build native macOS App
+        if: matrix.native
+        shell: bash
+        env:
+          PACKAGE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements-build.txt
+          ./macos/build.sh
+          mkdir -p release-assets
+          ditto -c -k --sequesterRsrc --keepParent 'dist/Folder Link.app' "release-assets/Folder-Link-${PACKAGE_PLATFORM}.zip"
+      - name: Build portable executable
+        if: '!matrix.native'
+        run: |
+          python -m pip install -r requirements-build.txt
+          python packaging/build_portable.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ matrix.platform }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish release assets
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Generate checksums and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          (cd release-assets && sha256sum Folder-Link-* > SHA256SUMS.txt)
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+            gh release edit "$RELEASE_TAG" --title "Folder Link ${RELEASE_TAG}" --notes-file packaging/RELEASE_NOTES.md
+          else
+            gh release create "$RELEASE_TAG" release-assets/* --verify-tag --title "Folder Link ${RELEASE_TAG}" --notes-file packaging/RELEASE_NOTES.md
+          fi
