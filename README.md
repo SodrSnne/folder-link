@@ -2,6 +2,8 @@
 
 开源 SSH / SFTP 文件夹同步工具，在本地电脑与远程服务器之间同步文件。支持 macOS、Windows 和 Linux。
 
+![Folder Link macOS 浅色界面（敏感信息已打码）](docs/images/folder-link-light.png)
+
 ## 功能
 
 - 双向同步：手动同步一次，或持续同步新增、修改的文件。
