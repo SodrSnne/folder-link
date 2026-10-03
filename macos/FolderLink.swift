@@ -99,6 +99,31 @@ struct SyncStatus: Decodable {
 }
 struct TrustRequest: Identifiable { let id = UUID(); let host: String; let fingerprint: String }
 
+// Persist only a summary, never raw logs, errors, passwords or trust prompts.
+struct SyncSummary: Codable, Equatable {
+    var uploaded: Int
+    var downloaded: Int
+    var skipped: Int
+    var lastSync: String?
+    var interrupted: Bool
+    var hadError: Bool
+    var conflicts: Int
+    var direction: String
+    var mode: String
+
+    init(_ status: SyncStatus) {
+        uploaded = status.uploaded; downloaded = status.downloaded; skipped = status.skipped
+        lastSync = status.last_sync; interrupted = status.running
+        hadError = status.error != nil; conflicts = status.conflicts.count
+        direction = status.direction; mode = status.mode
+    }
+    var description: String {
+        let action = direction == "pull" ? "远程拉取" : mode == "auto" ? "自动同步" : "双向同步"
+        let result = interrupted ? "关闭时尚未结束" : hadError ? "上次发生错误" : conflicts > 0 ? "有 \(conflicts) 项冲突待重新检查" : "已停止"
+        return "\(action) · \(result) · 上传 \(uploaded) / 下载 \(downloaded) / 未变化 \(skipped)"
+    }
+}
+
 struct Profile: Codable, Identifiable {
     var id: UUID
     var host: String
@@ -106,6 +131,19 @@ struct Profile: Codable, Identifiable {
     var username: String
     var local: String
     var remote: String
+    var summary: SyncSummary? = nil
+    var title: String { host.isEmpty ? "新 SSH 连接" : (username.isEmpty ? host : "\(username)@\(host)") }
+    var isEmpty: Bool { host.isEmpty && username.isEmpty && local.isEmpty && remote.isEmpty && (port.isEmpty || port == "22") }
+}
+struct ClosedTab: Codable, Identifiable {
+    var profile: Profile
+    var closedAt: Date
+    var id: UUID { profile.id }
+}
+struct SavedWorkspace: Codable {
+    var profiles: [Profile]
+    var selected: UUID
+    var history: [ClosedTab]
 }
 struct RemoteEntry: Decodable, Identifiable {
     let name: String
@@ -124,6 +162,7 @@ struct RemoteEntry: Decodable, Identifiable {
     @Published var local: String
     @Published var remote: String
     @Published var status = SyncStatus()
+    @Published var lastSummary: SyncSummary?
     @Published var busy = false
     @Published var ready = false
     @Published var closing = false
@@ -147,8 +186,9 @@ struct RemoteEntry: Decodable, Identifiable {
     init(profile: Profile, bridge: Bridge) {
         id = profile.id; host = profile.host; port = profile.port; username = profile.username
         local = profile.local; remote = profile.remote; self.bridge = bridge
+        lastSummary = profile.summary
     }
-    var profile: Profile { Profile(id: id, host: host, port: port, username: username, local: local, remote: remote) }
+    var profile: Profile { Profile(id: id, host: host, port: port, username: username, local: local, remote: remote, summary: lastSummary) }
     var title: String { host.isEmpty ? "新 SSH 连接" : (username.isEmpty ? host : "\(username)@\(host)") }
     var locked: Bool { busy || status.running || trust != nil || browsing || closing || !ready }
     var stateLabel: String {
@@ -185,8 +225,20 @@ struct RemoteEntry: Decodable, Identifiable {
         defer { polling = false }
         do {
             let value = try await request("status")
-            status = try JSONDecoder().decode(SyncStatus.self, from: JSONSerialization.data(withJSONObject: value))
+            guard !closing else { return }
+            acceptStatus(value)
         } catch { if !bridge.closing && !closing { notify(error.localizedDescription, error: true) } }
+    }
+    func acceptStatus(_ value: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: value),
+              let next = try? JSONDecoder().decode(SyncStatus.self, from: data) else { return }
+        status = next
+        // An empty backend session after restoring must not erase the saved summary.
+        if next.running || next.last_sync != nil || next.error != nil || next.mode != "idle" {
+            var summary = SyncSummary(next)
+            if next.mode == "idle", let previous = lastSummary { summary.mode = previous.mode }
+            if lastSummary != summary { lastSummary = summary }
+        }
     }
     func perform(_ action: String) {
         guard !busy, !status.running, ready, !closing else { return }
@@ -270,24 +322,37 @@ struct RemoteEntry: Decodable, Identifiable {
 @MainActor final class Workspace: ObservableObject {
     @Published var sessions: [SyncModel] = []
     @Published var selected = UUID()
+    @Published var history: [ClosedTab] = []
+    @Published var showingHistory = false
     let bridge = Bridge()
     private var subscriptions: [UUID: AnyCancellable] = [:]
     init() {
         let defaults = UserDefaults.standard
+        let saved = defaults.data(forKey: "savedSSHWorkspace").flatMap { try? JSONDecoder().decode(SavedWorkspace.self, from: $0) }
         let profiles = defaults.data(forKey: "sshProfiles").flatMap { try? JSONDecoder().decode([Profile].self, from: $0) }
-        let initial = profiles?.isEmpty == false ? profiles! : [Profile(id: UUID(), host: defaults.string(forKey: "host") ?? "", port: defaults.string(forKey: "port") ?? "22", username: defaults.string(forKey: "username") ?? "", local: defaults.string(forKey: "local") ?? "", remote: defaults.string(forKey: "remote") ?? "")]
+        let restored = saved?.profiles ?? profiles ?? []
+        let initial = !restored.isEmpty ? restored : [Profile(id: UUID(), host: defaults.string(forKey: "host") ?? "", port: defaults.string(forKey: "port") ?? "22", username: defaults.string(forKey: "username") ?? "", local: defaults.string(forKey: "local") ?? "", remote: defaults.string(forKey: "remote") ?? "")]
         sessions = initial.map { SyncModel(profile: $0, bridge: bridge) }
-        selected = defaults.string(forKey: "selectedSSH").flatMap(UUID.init(uuidString:)).flatMap { id in sessions.contains { $0.id == id } ? id : nil } ?? sessions[0].id
+        history = Array((saved?.history ?? []).prefix(50))
+        let previousSelection = saved?.selected ?? defaults.string(forKey: "selectedSSH").flatMap(UUID.init(uuidString:))
+        selected = previousSelection.flatMap { id in sessions.contains { $0.id == id } ? id : nil } ?? sessions[0].id
         for session in sessions { watch(session) }
     }
     func watch(_ session: SyncModel) {
-        subscriptions[session.id] = Publishers.MergeMany([session.$host, session.$port, session.$username, session.$local, session.$remote])
-            .dropFirst(5).debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+        let fields = Publishers.MergeMany([session.$host, session.$port, session.$username, session.$local, session.$remote])
+            .dropFirst(5).map { _ in () }
+        subscriptions[session.id] = fields.merge(with: session.$lastSummary.dropFirst().map { _ in () })
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
             .sink { [weak self] _ in self?.save() }
     }
     func save() {
-        if let bytes = try? JSONEncoder().encode(sessions.map(\.profile)) { UserDefaults.standard.set(bytes, forKey: "sshProfiles") }
-        UserDefaults.standard.set(selected.uuidString, forKey: "selectedSSH")
+        let snapshot = SavedWorkspace(profiles: sessions.map(\.profile), selected: selected, history: history)
+        if let bytes = try? JSONEncoder().encode(snapshot) {
+            let defaults = UserDefaults.standard
+            defaults.set(bytes, forKey: "savedSSHWorkspace")
+            // Migrate legacy preferences once the complete workspace has been saved.
+            for key in ["sshProfiles", "selectedSSH", "host", "port", "username", "local", "remote"] { defaults.removeObject(forKey: key) }
+        }
     }
     func select(_ id: UUID) { selected = id; save() }
     func add() {
@@ -298,10 +363,21 @@ struct RemoteEntry: Decodable, Identifiable {
     }
     func close(_ session: SyncModel) {
         guard !session.closing else { return }
+        let wasRunning = session.status.running
+        save()
         session.closing = true; session.stopPolling()
         Task {
             do {
-                _ = try await bridge.request("close", ["_session": session.id.uuidString])
+                if bridge.process.isRunning {
+                    let result = try await bridge.request("close", ["_session": session.id.uuidString])
+                    if let status = result["status"] as? [String: Any] { session.acceptStatus(status) }
+                }
+                if wasRunning, var summary = session.lastSummary { summary.interrupted = true; session.lastSummary = summary }
+                let profile = session.profile
+                if !profile.isEmpty {
+                    history.insert(ClosedTab(profile: profile, closedAt: Date()), at: 0)
+                    history = Array(history.prefix(50))
+                }
                 session.discard()
                 sessions.removeAll { $0.id == session.id }; subscriptions.removeValue(forKey: session.id)
                 if sessions.isEmpty { add() }
@@ -310,6 +386,21 @@ struct RemoteEntry: Decodable, Identifiable {
             } catch { session.closing = false; session.launch(); session.notify(error.localizedDescription, error: true) }
         }
     }
+    func restore(_ record: ClosedTab) {
+        guard history.contains(where: { $0.id == record.id }) else { return }
+        var profile = record.profile
+        // Closed backend session IDs are tombstoned; reopening needs a fresh ID.
+        profile.id = UUID()
+        let session = SyncModel(profile: profile, bridge: bridge)
+        sessions.append(session); watch(session); selected = session.id
+        history.removeAll { $0.id == record.id }
+        if bridge.process.isRunning { session.launch() }
+        session.notify("已恢复标签。请输入密码后手动连接或启动同步。")
+        showingHistory = false
+        save()
+    }
+    func removeHistory(_ id: UUID) { history.removeAll { $0.id == id }; save() }
+    func clearHistory() { history.removeAll(); save() }
     func launch() {
         do {
             try bridge.launch()
@@ -421,6 +512,8 @@ struct RootView: View {
             }.scrollIndicators(.hidden)
             Button { workspace.add() } label: { Image(systemName: "plus").frame(width: 25, height: 25) }
                 .buttonStyle(.borderless).help("新建 SSH 标签页（⌘T）").accessibilityLabel("新建 SSH 标签页")
+            Button { workspace.showingHistory = true } label: { Label("历史记录", systemImage: "clock.arrow.circlepath") }
+                .buttonStyle(.borderless).help("恢复最近关闭的 SSH 标签页")
         }
     }
     var sidebar: some View {
@@ -444,7 +537,7 @@ struct RootView: View {
                     .font(.system(size: 10)).foregroundStyle(.secondary).lineSpacing(5)
                 Divider().opacity(0.6)
                 HStack(spacing: 6) { Circle().fill(model.ready ? .green.opacity(0.7) : .orange).frame(width: 5, height: 5); Text(model.ready ? "同步引擎已就绪" : "正在准备引擎") }.font(.system(size: 10)).foregroundStyle(.secondary)
-                Text("macOS · 1.2").font(.system(size: 9)).foregroundStyle(.tertiary)
+                Text("macOS · 1.3").font(.system(size: 9)).foregroundStyle(.tertiary)
             }
         }.padding(.horizontal, 20).padding(.top, 52).padding(.bottom, 26)
         .frame(maxHeight: .infinity).background(.white.opacity(0.05))
@@ -545,6 +638,15 @@ struct RootView: View {
                     Text("同步动态").font(.system(size: 13, weight: .semibold)); Spacer()
                     Text(model.status.last_sync.map { "上次完成 \($0)" } ?? "等待开始").font(.system(size: 10)).foregroundStyle(.tertiary)
                 }
+                if model.status.logs.isEmpty, let summary = model.lastSummary {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Label("上次保存的同步摘要", systemImage: "clock.arrow.circlepath").font(.system(size: 11, weight: .medium))
+                        Text(summary.description).font(.system(size: 11))
+                        if let time = summary.lastSync { Text("上次完成：\(time)").font(.system(size: 10)) }
+                        Text("当前未启动同步，连接后会重新检查两端文件。").font(.system(size: 10))
+                    }.foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12).background(.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
+                }
                 HStack(spacing: 22) {
                     stat("arrow.up", "已上传", model.status.uploaded)
                     stat("arrow.down", "已下载", model.status.downloaded)
@@ -588,9 +690,61 @@ struct RootView: View {
 struct WorkspaceView: View {
     @ObservedObject var workspace: Workspace
     var body: some View {
-        if let session = workspace.sessions.first(where: { $0.id == workspace.selected }) {
-            RootView(model: session, workspace: workspace).id(session.id)
-        } else { ProgressView().frame(width: 600, height: 400) }
+        Group {
+            if let session = workspace.sessions.first(where: { $0.id == workspace.selected }) {
+                RootView(model: session, workspace: workspace).id(session.id)
+            } else { ProgressView().frame(width: 600, height: 400) }
+        }.sheet(isPresented: $workspace.showingHistory) { HistoryView(workspace: workspace) }
+    }
+}
+
+struct HistoryView: View {
+    @ObservedObject var workspace: Workspace
+    @State private var confirmClear = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack {
+                Label("最近关闭的标签", systemImage: "clock.arrow.circlepath").font(.system(size: 21, weight: .semibold))
+                Spacer()
+                Text("\(workspace.history.count) / 50").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            Text("保存连接信息、文件夹路径和同步摘要。密码不保存，恢复后需手动连接。").font(.system(size: 12)).foregroundStyle(.secondary)
+            ScrollView {
+                if workspace.history.isEmpty {
+                    Text("暂无关闭记录").foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.vertical, 100)
+                }
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    ForEach(workspace.history) { record in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text(record.profile.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                                Spacer()
+                                Button("恢复") { workspace.restore(record) }.buttonStyle(.borderedProminent)
+                                Button { workspace.removeHistory(record.id) } label: { Image(systemName: "trash") }
+                                    .help("删除此记录").accessibilityLabel("删除记录：\(record.profile.title)")
+                            }
+                            Text(record.closedAt, format: .dateTime.year().month().day().hour().minute())
+                                .font(.system(size: 10)).foregroundStyle(.tertiary)
+                            Text("端口：\(record.profile.port)")
+                            Text("本地：\(record.profile.local.isEmpty ? "未选择" : record.profile.local)")
+                            Text("远程：\(record.profile.remote.isEmpty ? "未选择" : record.profile.remote)")
+                            if let summary = record.profile.summary { Text(summary.description) }
+                        }.font(.system(size: 11)).foregroundStyle(.secondary)
+                            .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(14).background(.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
+                    }
+                }
+            }.frame(height: 360)
+            HStack {
+                Button("清空历史记录", role: .destructive) { confirmClear = true }.disabled(workspace.history.isEmpty)
+                Spacer()
+                Button("完成") { workspace.showingHistory = false }.keyboardShortcut(.cancelAction)
+            }
+        }.padding(26).frame(width: 620)
+            .alert("清空全部关闭记录？", isPresented: $confirmClear) {
+                Button("取消", role: .cancel) {}
+                Button("清空", role: .destructive) { workspace.clearHistory() }
+            } message: { Text("清空后无法从历史记录恢复。当前打开的标签不受影响。") }
     }
 }
 
@@ -694,6 +848,7 @@ struct RemoteBrowser: View {
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "显示主窗口", action: #selector(showWindow), keyEquivalent: "0").target = self
         appMenu.addItem(withTitle: "新建 SSH 标签页", action: #selector(newTab), keyEquivalent: "t").target = self
+        appMenu.addItem(withTitle: "最近关闭的标签", action: #selector(showHistory), keyEquivalent: "").target = self
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "退出 Folder Link", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let editItem = NSMenuItem(); menu.addItem(editItem); let editMenu = NSMenu(title: "编辑"); editItem.submenu = editMenu
@@ -713,13 +868,14 @@ struct RemoteBrowser: View {
         workspace.launch()
     }
     @objc func newTab() { workspace.add(); showWindow() }
+    @objc func showHistory() { workspace.showingHistory = true; showWindow() }
     @objc func showWindow() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showWindow(); return true }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if terminating { return .terminateLater }
         terminating = true
-        if !workspace.bridge.process.isRunning { return .terminateNow }
+        if !workspace.bridge.process.isRunning { workspace.shutdown(); return .terminateNow }
         workspace.bridge.ended = { NSApp.reply(toApplicationShouldTerminate: true) }
         workspace.shutdown()
         Task { @MainActor in

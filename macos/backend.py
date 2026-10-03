@@ -106,6 +106,7 @@ def handle(command):
         with sessions_lock:
             managers.pop(key, None)
             active_configs.pop(key, None)
+        return {'ok': True, 'status': current.snapshot()}
     else: raise ValueError('未知操作。')
     return {'ok': True}
 
